@@ -7,9 +7,11 @@ from app.models import TaskStatus
 from app.config import get_settings
 from app.services.audio_processor import (
     download_youtube_audio,
+    convert_to_opus,
     convert_to_mono_16khz,
     save_uploaded_file,
     cleanup_task_files,
+    is_chirp2_compatible,
 )
 from app.services.gcp_service import (
     upload_to_gcs,
@@ -115,14 +117,33 @@ def update_task(
     })
 
 
+async def _cleanup_resources(task_id: str, gcs_uri: Optional[str]) -> None:
+    """
+    Fire-and-forget cleanup of temp files and GCS objects.
+    Runs asynchronously after task completion so user sees results immediately.
+    """
+    try:
+        cleanup_task_files(task_id)
+    except Exception as e:
+        print(f"Warning: Failed to cleanup local files for {task_id}: {e}")
+    
+    try:
+        if gcs_uri:
+            await asyncio.to_thread(delete_from_gcs, gcs_uri)
+    except Exception as e:
+        print(f"Warning: Failed to cleanup GCS for {task_id}: {e}")
+
+
 async def process_youtube_url(task_id: str, url: str, language_code: str) -> None:
     """
     Async task to process a YouTube URL and generate VTT.
+    Optimized: downloads as Opus (YouTube's native format) and uploads
+    directly to GCS without WAV conversion.
     """
     gcs_uri = None
     
     try:
-        # Step 1: Download audio from YouTube
+        # Step 1: Download audio from YouTube (as Opus — no WAV conversion)
         update_task(
             task_id, 
             TaskStatus.DOWNLOADING, 
@@ -137,21 +158,11 @@ async def process_youtube_url(task_id: str, url: str, language_code: str) -> Non
         )
         print(f"DEBUG: Downloaded audio to {audio_path}")
         
-        # Step 2: Convert to mono 16kHz
-        update_task(
-            task_id,
-            TaskStatus.CONVERTING,
-            "Converting audio to mono 16kHz WAV...",
-            progress=30
-        )
-        
-        converted_path = await asyncio.to_thread(convert_to_mono_16khz, audio_path, task_id)
-        
         # Log audio duration for debugging
         try:
             import subprocess as _sp
             probe = _sp.run(
-                ['ffprobe', '-v', 'quiet', '-show_entries', 'format=duration', '-of', 'csv=p=0', converted_path],
+                ['ffprobe', '-v', 'quiet', '-show_entries', 'format=duration', '-of', 'csv=p=0', audio_path],
                 capture_output=True, text=True
             )
             if probe.returncode == 0:
@@ -160,25 +171,24 @@ async def process_youtube_url(task_id: str, url: str, language_code: str) -> Non
         except Exception:
             pass
         
-        # Step 3: Upload to GCS
+        # Step 2: Upload directly to GCS (skip WAV conversion — Chirp 2 auto-decodes)
         update_task(
             task_id,
             TaskStatus.UPLOADING,
             "Uploading audio to Google Cloud Storage...",
-            progress=50
+            progress=40
         )
         
-        gcs_uri = await asyncio.to_thread(upload_to_gcs, converted_path, task_id)
+        gcs_uri = await asyncio.to_thread(upload_to_gcs, audio_path, task_id)
         
-        # Step 4: Transcribe using Speech-to-Text V2
+        # Step 3: Transcribe using Speech-to-Text V2
         update_task(
             task_id,
             TaskStatus.TRANSCRIBING,
             "Transcribing audio (this may take a while)...",
-            progress=70
+            progress=60
         )
         
-        # Get VTT content directly from STT inline results
         vtt_content = await asyncio.to_thread(
             transcribe_audio, 
             gcs_uri, 
@@ -192,7 +202,7 @@ async def process_youtube_url(task_id: str, url: str, language_code: str) -> Non
         # Parse metrics
         duration, segments = parse_vtt_metrics(vtt_content)
         
-        # Step 5: Complete
+        # Step 4: Complete — mark done BEFORE cleanup so user sees result immediately
         print(f"DEBUG: Task {task_id} completed successfully")
         update_task(
             task_id,
@@ -217,13 +227,8 @@ async def process_youtube_url(task_id: str, url: str, language_code: str) -> Non
         )
     
     finally:
-        # Cleanup
-        try:
-            cleanup_task_files(task_id)
-            if gcs_uri:
-                await asyncio.to_thread(delete_from_gcs, gcs_uri)
-        except Exception:
-            pass  # Ignore cleanup errors
+        # Fire-and-forget cleanup — don't block the completed status
+        asyncio.ensure_future(_cleanup_resources(task_id, gcs_uri))
 
 
 async def process_uploaded_file(
@@ -234,6 +239,8 @@ async def process_uploaded_file(
 ) -> None:
     """
     Async task to process an uploaded audio file and generate VTT.
+    Optimized: if file is already Chirp 2 compatible, skip conversion.
+    Otherwise converts to Opus for smaller upload size.
     """
     gcs_uri = None
     
@@ -253,15 +260,24 @@ async def process_uploaded_file(
             task_id
         )
         
-        # Step 2: Convert to mono 16kHz
-        update_task(
-            task_id,
-            TaskStatus.CONVERTING,
-            "Converting audio to mono 16kHz WAV...",
-            progress=30
-        )
-        
-        converted_path = await asyncio.to_thread(convert_to_mono_16khz, audio_path, task_id)
+        # Step 2: Convert if needed (skip if already compatible)
+        upload_path = audio_path
+        if is_chirp2_compatible(audio_path):
+            print(f"DEBUG: File {filename} is Chirp 2 compatible, skipping conversion")
+            update_task(
+                task_id,
+                TaskStatus.CONVERTING,
+                "Audio format compatible, skipping conversion...",
+                progress=30
+            )
+        else:
+            update_task(
+                task_id,
+                TaskStatus.CONVERTING,
+                "Converting audio to Opus...",
+                progress=30
+            )
+            upload_path = await asyncio.to_thread(convert_to_opus, audio_path, task_id)
         
         # Step 3: Upload to GCS
         update_task(
@@ -271,7 +287,7 @@ async def process_uploaded_file(
             progress=50
         )
         
-        gcs_uri = await asyncio.to_thread(upload_to_gcs, converted_path, task_id)
+        gcs_uri = await asyncio.to_thread(upload_to_gcs, upload_path, task_id)
         
         # Step 4: Transcribe using Speech-to-Text V2
         update_task(
@@ -281,7 +297,6 @@ async def process_uploaded_file(
             progress=70
         )
         
-        # Get VTT content directly from STT inline results
         vtt_content = await asyncio.to_thread(
             transcribe_audio,
             gcs_uri,
@@ -295,7 +310,7 @@ async def process_uploaded_file(
         # Parse metrics
         duration, segments = parse_vtt_metrics(vtt_content)
         
-        # Step 5: Complete
+        # Step 5: Complete — mark done BEFORE cleanup so user sees result immediately
         update_task(
             task_id,
             TaskStatus.COMPLETED,
@@ -316,10 +331,5 @@ async def process_uploaded_file(
         )
     
     finally:
-        # Cleanup
-        try:
-            cleanup_task_files(task_id)
-            if gcs_uri:
-                await asyncio.to_thread(delete_from_gcs, gcs_uri)
-        except Exception:
-            pass  # Ignore cleanup errors
+        # Fire-and-forget cleanup — don't block the completed status
+        asyncio.ensure_future(_cleanup_resources(task_id, gcs_uri))

@@ -225,82 +225,104 @@ def normalize_thai_spaces(vtt_text: str) -> str:
     Normalize Thai spacing in VTT content.
     Google STT Chirp model adds spaces between every Thai word token.
     This function:
-      1. Removes all spaces between Thai characters (joining them)
-      2. Re-adds spaces at natural clause/phrase boundaries
+      1. Collects all subtitle text lines
+      2. Batch-joins Thai text, removes extra spaces, then tokenizes ONCE
+      3. Re-adds spaces at natural clause/phrase boundaries
     Only processes the text portion of VTT cues, not timestamps or headers.
     """
     lines = vtt_text.split('\n')
-    result_lines = []
-    # Regex to match VTT timestamp lines
     timestamp_re = re.compile(r'^\d{2}:\d{2}:\d{2}\.\d{3}\s*-->\s*\d{2}:\d{2}:\d{2}\.\d{3}')
 
-    for line in lines:
+    # First pass: collect Thai text lines and their indices
+    text_indices = []
+    thai_segments_raw = []
+
+    for idx, line in enumerate(lines):
         stripped = line.strip()
-        # Don't touch: empty lines, WEBVTT header, cue numbers, timestamp lines
         if (
             not stripped
             or stripped == 'WEBVTT'
             or stripped.isdigit()
             or timestamp_re.match(stripped)
         ):
-            result_lines.append(line)
-        else:
-            # This is a subtitle text line — normalize Thai spacing
-            result_lines.append(_normalize_thai_line(stripped))
-
-    return '\n'.join(result_lines)
-
-
-def _normalize_thai_line(text: str) -> str:
-    """
-    Normalize a single line of Thai subtitle text.
-    - Remove all spaces between Thai characters
-    - Re-add spaces at clause/phrase boundaries using word_tokenize
-    - Preserve spaces around non-Thai text (English, numbers)
-    """
-    # Split into Thai and non-Thai segments
-    segments = re.split(r'((?:[a-zA-Z0-9]+(?:\s+[a-zA-Z0-9]*)*))', text)
-
-    processed_parts = []
-    for segment in segments:
-        if not segment:
             continue
-        # If segment is non-Thai (English/numbers), keep with space padding
-        if re.match(r'^[a-zA-Z0-9]', segment.strip()):
-            processed_parts.append(f' {segment.strip()} ')
+        text_indices.append(idx)
+        thai_segments_raw.append(stripped)
+
+    if not thai_segments_raw:
+        return vtt_text
+
+    # Second pass: extract Thai-only text from all lines, batch tokenize once
+    all_thai_parts = []
+    line_thai_ranges = []  # (start, end) indices into all_thai_parts per line
+
+    for raw_line in thai_segments_raw:
+        segments = re.split(r'((?:[a-zA-Z0-9]+(?:\s+[a-zA-Z0-9]*)*))', raw_line)
+        start = len(all_thai_parts)
+        for segment in segments:
+            if not segment:
+                continue
+            if not re.match(r'^[a-zA-Z0-9]', segment.strip()):
+                thai_text = re.sub(r'\s+', '', segment)
+                if thai_text:
+                    all_thai_parts.append(thai_text)
+        line_thai_ranges.append((start, len(all_thai_parts)))
+
+    # Batch tokenize: join all Thai parts with a unique separator, tokenize once
+    _SEP = '\u200b'  # Zero-width space as separator
+    joined = _SEP.join(all_thai_parts)
+    all_tokens = word_tokenize(joined, engine='newmm') if joined else []
+
+    # Split tokens back by separator
+    tokenized_parts = []
+    current = []
+    for token in all_tokens:
+        if token == _SEP:
+            tokenized_parts.append(current)
+            current = []
         else:
-            # Thai segment: remove all internal spaces, then re-add clause breaks
-            thai_text = re.sub(r'\s+', '', segment)
-            if thai_text:
-                processed_parts.append(_add_clause_spaces(thai_text))
+            current.append(token)
+    tokenized_parts.append(current)
 
-    # Join and clean up multiple spaces
-    result = ''.join(processed_parts).strip()
-    result = re.sub(r'\s{2,}', ' ', result)
-    return result
+    # Third pass: rebuild each line with clause spacing
+    part_idx = 0
+    for line_idx, raw_line in zip(text_indices, thai_segments_raw):
+        segments = re.split(r'((?:[a-zA-Z0-9]+(?:\s+[a-zA-Z0-9]*)*))', raw_line)
+        processed = []
+        for segment in segments:
+            if not segment:
+                continue
+            if re.match(r'^[a-zA-Z0-9]', segment.strip()):
+                processed.append(f' {segment.strip()} ')
+            else:
+                thai_text = re.sub(r'\s+', '', segment)
+                if thai_text and part_idx < len(tokenized_parts):
+                    processed.append(_add_clause_spaces_from_tokens(tokenized_parts[part_idx]))
+                    part_idx += 1
+        result = ''.join(processed).strip()
+        result = re.sub(r'\s{2,}', ' ', result)
+        lines[line_idx] = result
+
+    return '\n'.join(lines)
 
 
-def _add_clause_spaces(thai_text: str) -> str:
+def _add_clause_spaces_from_tokens(words: list) -> str:
     """
-    Tokenize Thai text and insert spaces at clause/phrase boundaries.
-    Uses PyThaiNLP word_tokenize then adds spaces before clause starters
-    and after clause-ending particles.
+    Insert spaces at clause/phrase boundaries from pre-tokenized words.
     """
-    words = word_tokenize(thai_text, engine='newmm')
     if not words:
-        return thai_text
+        return ''
 
     result_parts = []
     i = 0
     while i < len(words):
         word = words[i]
 
-        # Skip whitespace tokens
         if word.strip() == '':
             i += 1
             continue
 
-        # Check for multi-word clause starters (e.g. "เพราะว่า")
+        # Check for multi-word clause starters
         if i + 1 < len(words):
             two_word = word + words[i + 1]
             if two_word in _CLAUSE_STARTERS and result_parts:
@@ -309,14 +331,12 @@ def _add_clause_spaces(thai_text: str) -> str:
                 i += 2
                 continue
 
-        # Check single-word clause starters — add space BEFORE
         if word in _CLAUSE_STARTERS and result_parts:
             result_parts.append(' ')
             result_parts.append(word)
             i += 1
             continue
 
-        # Check clause-ending particles — add space AFTER
         if word in _CLAUSE_END_PARTICLES and i + 1 < len(words):
             result_parts.append(word)
             result_parts.append(' ')
