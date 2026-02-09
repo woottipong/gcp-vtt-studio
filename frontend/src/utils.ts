@@ -1,3 +1,6 @@
+import { type ClassValue, clsx } from 'clsx';
+import { twMerge } from 'tailwind-merge';
+
 /**
  * Format bytes to human-readable file size
  */
@@ -10,8 +13,8 @@ export function formatFileSize(bytes: number): string {
 }
 
 /**
- * Combine className strings conditionally
+ * Combine className strings conditionally with tailwind-merge
  */
-export function cn(...classes: (string | boolean | undefined)[]): string {
-    return classes.filter(Boolean).join(' ');
+export function cn(...inputs: ClassValue[]) {
+    return twMerge(clsx(inputs));
 }

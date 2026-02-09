@@ -1,3 +1,6 @@
+// Language codes
+export type LanguageCode = 'th-TH' | 'en-US' | 'ja-JP';
+
 // Tab types
 export const TABS = {
     YOUTUBE: 'youtube',

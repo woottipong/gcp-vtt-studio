@@ -26,6 +26,8 @@ export interface TaskStatusResponse {
     progress: number;
     vtt_url: string | null;
     error: string | null;
+    duration_seconds?: number;
+    segments_count?: number;
 }
 
 export const api = {

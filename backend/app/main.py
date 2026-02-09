@@ -147,7 +147,9 @@ async def get_task_status(task_id: str):
         message=task["message"],
         progress=task["progress"],
         vtt_url=get_vtt_download_url(task_id) if task.get("vtt_content") else None,
-        error=task.get("error")
+        error=task.get("error"),
+        duration_seconds=task.get("duration_seconds"),
+        segments_count=task.get("segments_count")
     )
 
 

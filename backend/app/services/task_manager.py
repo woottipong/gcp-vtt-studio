@@ -1,7 +1,8 @@
 import asyncio
 import os
+import re
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Dict, Optional, Tuple
 from app.models import TaskStatus
 from app.config import get_settings
 from app.services.audio_processor import (
@@ -20,6 +21,31 @@ from app.services.gcp_service import (
 tasks: Dict[str, dict] = {}
 
 settings = get_settings()
+
+
+def parse_vtt_metrics(vtt_content: str) -> Tuple[float, int]:
+    """Parse VTT content to get duration in seconds and number of segments."""
+    segments = 0
+    max_time = 0.0
+    
+    # Match VTT timestamp lines
+    timestamp_re = re.compile(r'(\d{2}:\d{2}:\d{2}\.\d{3})\s*-->\s*(\d{2}:\d{2}:\d{2}\.\d{3})')
+    
+    for line in vtt_content.split('\n'):
+        match = timestamp_re.search(line)
+        if match:
+            segments += 1
+            end_time_str = match.group(2)
+            # Convert HH:MM:SS.mmm to seconds
+            try:
+                h, m, s = end_time_str.split(':')
+                seconds = int(h) * 3600 + int(m) * 60 + float(s)
+                if seconds > max_time:
+                    max_time = seconds
+            except (ValueError, IndexError):
+                continue
+                
+    return max_time, segments
 
 
 def ensure_vtt_output_dir() -> Path:
@@ -70,6 +96,8 @@ def update_task(
     progress: int = 0,
     vtt_content: Optional[str] = None,
     error: Optional[str] = None,
+    duration_seconds: Optional[float] = None,
+    segments_count: Optional[int] = None,
 ) -> None:
     """Update task status in storage."""
     if task_id not in tasks:
@@ -82,6 +110,8 @@ def update_task(
         "progress": progress,
         "vtt_content": vtt_content,
         "error": error,
+        "duration_seconds": duration_seconds,
+        "segments_count": segments_count,
     })
 
 
@@ -157,7 +187,10 @@ async def process_youtube_url(task_id: str, url: str, language_code: str) -> Non
         )
         
         # Save VTT locally
-        vtt_local_path = await asyncio.to_thread(save_vtt_locally, task_id, vtt_content)
+        await asyncio.to_thread(save_vtt_locally, task_id, vtt_content)
+        
+        # Parse metrics
+        duration, segments = parse_vtt_metrics(vtt_content)
         
         # Step 5: Complete
         print(f"DEBUG: Task {task_id} completed successfully")
@@ -166,7 +199,9 @@ async def process_youtube_url(task_id: str, url: str, language_code: str) -> Non
             TaskStatus.COMPLETED,
             "Transcription completed successfully!",
             progress=100,
-            vtt_content=vtt_content
+            vtt_content=vtt_content,
+            duration_seconds=duration,
+            segments_count=segments
         )
         
     except Exception as e:
@@ -255,7 +290,10 @@ async def process_uploaded_file(
         )
         
         # Save VTT locally
-        vtt_local_path = await asyncio.to_thread(save_vtt_locally, task_id, vtt_content)
+        await asyncio.to_thread(save_vtt_locally, task_id, vtt_content)
+        
+        # Parse metrics
+        duration, segments = parse_vtt_metrics(vtt_content)
         
         # Step 5: Complete
         update_task(
@@ -263,7 +301,9 @@ async def process_uploaded_file(
             TaskStatus.COMPLETED,
             "Transcription completed successfully!",
             progress=100,
-            vtt_content=vtt_content
+            vtt_content=vtt_content,
+            duration_seconds=duration,
+            segments_count=segments
         )
         
     except Exception as e:

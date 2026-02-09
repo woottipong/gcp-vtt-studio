@@ -72,3 +72,5 @@ class TaskStatusResponse(BaseModel):
     progress: int
     vtt_url: Optional[str] = None
     error: Optional[str] = None
+    duration_seconds: Optional[float] = None
+    segments_count: Optional[int] = None
