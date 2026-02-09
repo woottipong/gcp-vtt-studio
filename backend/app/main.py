@@ -8,6 +8,21 @@ from app.models import (
     TaskStatusResponse,
     TaskStatus,
 )
+from app.config import get_settings
+from app.constants import (
+    CORS_ORIGINS,
+    SUPPORTED_LANGUAGES,
+    DEFAULT_LANGUAGE,
+    MSG_TASK_NOT_FOUND,
+    MSG_TASK_NOT_COMPLETED,
+    MSG_VTT_NOT_FOUND,
+    MSG_TASK_PENDING,
+    MSG_TASK_PROCESSING,
+    HTTP_400_BAD_REQUEST,
+    HTTP_404_NOT_FOUND,
+)
+from app.validators import validate_uploaded_file
+from app.utils import create_task_response, format_vtt_filename, get_vtt_download_url
 from app.services.audio_processor import generate_task_id
 from app.services.task_manager import (
     get_task,
@@ -16,7 +31,6 @@ from app.services.task_manager import (
     process_uploaded_file,
     read_local_vtt,
 )
-from app.config import get_settings
 
 settings = get_settings()
 
@@ -29,7 +43,7 @@ app = FastAPI(
 # CORS middleware for frontend
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://localhost:3000"],
+    allow_origins=CORS_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -57,7 +71,7 @@ async def transcribe_youtube(
     update_task(
         task_id,
         TaskStatus.PENDING,
-        "Task created, starting download...",
+        MSG_TASK_PENDING,
         progress=0
     )
     
@@ -69,12 +83,7 @@ async def transcribe_youtube(
         request.language_code
     )
     
-    return TaskResponse(
-        task_id=task_id,
-        status=TaskStatus.PENDING,
-        message="Task created successfully",
-        progress=0
-    )
+    return create_task_response(task_id)
 
 
 @app.post("/api/transcribe/upload", response_model=TaskResponse)
@@ -87,32 +96,15 @@ async def transcribe_upload(
     Start a transcription task for an uploaded audio file.
     Supports WAV, MP3, FLAC, OGG, and other common audio formats.
     """
-    # Validate filename
-    if not file.filename:
-        raise HTTPException(
-            status_code=400,
-            detail="No filename provided"
-        )
-    
-    # Validate file type
-    allowed_extensions = {'.wav', '.mp3', '.flac', '.ogg', '.m4a', '.aac', '.wma'}
-    file_ext = '.' + file.filename.split('.')[-1].lower() if '.' in file.filename else ''
-    
-    if file_ext not in allowed_extensions:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Unsupported file format. Allowed: {', '.join(allowed_extensions)}"
-        )
-    
-    # Check file size
+    # Read file content
     file_content = await file.read()
-    file_size_mb = len(file_content) / (1024 * 1024)
     
-    if file_size_mb > settings.max_file_size_mb:
-        raise HTTPException(
-            status_code=400,
-            detail=f"File too large. Maximum size: {settings.max_file_size_mb}MB"
-        )
+    # Validate file (filename, format, size)
+    validated_filename, _, _ = validate_uploaded_file(
+        file.filename,
+        file_content,
+        settings.max_file_size_mb
+    )
     
     task_id = generate_task_id()
     
@@ -120,7 +112,7 @@ async def transcribe_upload(
     update_task(
         task_id,
         TaskStatus.PENDING,
-        "Task created, processing file...",
+        MSG_TASK_PROCESSING,
         progress=0
     )
     
@@ -129,16 +121,11 @@ async def transcribe_upload(
         process_uploaded_file,
         task_id,
         file_content,
-        file.filename,
+        validated_filename,
         language_code
     )
     
-    return TaskResponse(
-        task_id=task_id,
-        status=TaskStatus.PENDING,
-        message="Task created successfully",
-        progress=0
-    )
+    return create_task_response(task_id)
 
 
 @app.get("/api/task/{task_id}", response_model=TaskStatusResponse)
@@ -149,14 +136,17 @@ async def get_task_status(task_id: str):
     task = get_task(task_id)
     
     if not task:
-        raise HTTPException(status_code=404, detail="Task not found")
+        raise HTTPException(
+            status_code=HTTP_404_NOT_FOUND,
+            detail=MSG_TASK_NOT_FOUND
+        )
     
     return TaskStatusResponse(
         task_id=task["task_id"],
         status=task["status"],
         message=task["message"],
         progress=task["progress"],
-        vtt_url=f"/api/task/{task_id}/download" if task.get("vtt_content") else None,
+        vtt_url=get_vtt_download_url(task_id) if task.get("vtt_content") else None,
         error=task.get("error")
     )
 
@@ -170,10 +160,16 @@ async def download_vtt(task_id: str):
     task = get_task(task_id)
     
     if not task:
-        raise HTTPException(status_code=404, detail="Task not found")
+        raise HTTPException(
+            status_code=HTTP_404_NOT_FOUND,
+            detail=MSG_TASK_NOT_FOUND
+        )
     
     if task["status"] != TaskStatus.COMPLETED:
-        raise HTTPException(status_code=400, detail="Task not completed yet")
+        raise HTTPException(
+            status_code=HTTP_400_BAD_REQUEST,
+            detail=MSG_TASK_NOT_COMPLETED
+        )
     
     # Try reading from local file first
     vtt_content = read_local_vtt(task_id)
@@ -183,13 +179,16 @@ async def download_vtt(task_id: str):
         vtt_content = task.get("vtt_content")
     
     if not vtt_content:
-        raise HTTPException(status_code=404, detail="VTT content not found")
+        raise HTTPException(
+            status_code=HTTP_404_NOT_FOUND,
+            detail=MSG_VTT_NOT_FOUND
+        )
     
     return Response(
         content=vtt_content,
         media_type="text/vtt",
         headers={
-            "Content-Disposition": f"attachment; filename=subtitles_{task_id}.vtt"
+            "Content-Disposition": f"attachment; filename={format_vtt_filename(task_id)}"
         }
     )
 
@@ -200,11 +199,8 @@ async def get_supported_languages():
     Get list of supported languages for transcription.
     """
     return {
-        "languages": [
-            {"code": "th-TH", "name": "ไทย"},
-            {"code": "en-US", "name": "อังกฤษ"},
-        ],
-        "default": "th-TH"
+        "languages": SUPPORTED_LANGUAGES,
+        "default": DEFAULT_LANGUAGE
     }
 
 
