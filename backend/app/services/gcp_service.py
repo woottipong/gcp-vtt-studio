@@ -4,7 +4,8 @@ from google.cloud.speech_v2 import types as cloud_speech
 from google.api_core.client_options import ClientOptions
 from pathlib import Path
 import re
-from typing import Optional
+import time
+from typing import Optional, Callable
 from pythainlp.tokenize import word_tokenize
 from app.config import get_settings
 
@@ -86,11 +87,20 @@ def delete_from_gcs(gcs_uri: str) -> None:
         blob.delete()
 
 
-def transcribe_audio(gcs_audio_uri: str, task_id: str, language_code: Optional[str] = None) -> str:
+def transcribe_audio(
+    gcs_audio_uri: str,
+    task_id: str,
+    language_code: Optional[str] = None,
+    progress_callback: Optional[Callable[[int, str], None]] = None,
+) -> str:
     """
     Transcribe audio using Google Cloud Speech-to-Text V2 Batch API.
     Google generates VTT directly and writes to GCS temporarily.
     We download the VTT content, then delete the GCS VTT files.
+    
+    Args:
+        progress_callback: Optional callback(progress_percent, message) to report
+                          granular progress during transcription.
     Returns VTT content as a string.
     """
     # Use language code from settings if not provided
@@ -147,18 +157,64 @@ def transcribe_audio(gcs_audio_uri: str, task_id: str, language_code: Optional[s
     operation = client.batch_recognize(request=request)
     print(f"Waiting for transcription to complete (task_id: {task_id})...")
 
+    if progress_callback:
+        progress_callback(60, "Queued for transcription...")
+
+    # Poll operation for granular progress instead of blocking on result()
     try:
-        result = operation.result(timeout=settings.transcription_timeout)
+        deadline = time.time() + settings.transcription_timeout
+        last_pct = -1
+        
+        while not operation.done():
+            if time.time() > deadline:
+                try:
+                    operation.cancel()
+                except Exception:
+                    pass
+                raise TimeoutError(f"Transcription timed out after {settings.transcription_timeout}s")
+            
+            # Extract progress from operation metadata
+            if progress_callback:
+                try:
+                    metadata = operation.metadata
+                    if metadata and hasattr(metadata, 'transcription_metadata'):
+                        for _uri, file_meta in metadata.transcription_metadata.items():
+                            pct = getattr(file_meta, 'progress_percent', 0)
+                            if pct != last_pct:
+                                last_pct = pct
+                                # Map Google's 0-100% to our 60-90% range
+                                mapped = 60 + int(pct * 0.3)
+                                if pct < 20:
+                                    msg = "Decoding audio..."
+                                elif pct < 50:
+                                    msg = f"Recognizing speech... ({pct}%)"
+                                elif pct < 80:
+                                    msg = f"Generating subtitles... ({pct}%)"
+                                else:
+                                    msg = f"Finalizing results... ({pct}%)"
+                                progress_callback(mapped, msg)
+                except Exception:
+                    pass  # Metadata parsing is best-effort
+            
+            time.sleep(3)  # Poll every 3 seconds
+        
+        result = operation.result()
+        
+    except TimeoutError:
+        raise
     except Exception as e:
         try:
             operation.cancel()
         except Exception:
             pass
-        raise TimeoutError(f"Transcription timed out after {settings.transcription_timeout} seconds: {str(e)}")
+        raise TimeoutError(f"Transcription failed: {str(e)}")
+
+    if progress_callback:
+        progress_callback(90, "Downloading subtitles...")
 
     # Get the VTT file URI from results
     vtt_gcs_uri = None
-    if result.results:
+    if result and hasattr(result, 'results') and result.results:
         for uri, file_result in result.results.items():
             if hasattr(file_result, 'cloud_storage_result') and file_result.cloud_storage_result:
                 vtt_uri = file_result.cloud_storage_result.vtt_format_uri
@@ -171,7 +227,14 @@ def transcribe_audio(gcs_audio_uri: str, task_id: str, language_code: Optional[s
 
     # Download VTT content from GCS
     vtt_content = _download_text_from_gcs(vtt_gcs_uri)
+
+    if progress_callback:
+        progress_callback(93, "Normalizing Thai text...")
+
     vtt_content = normalize_thai_spaces(vtt_content)
+
+    if progress_callback:
+        progress_callback(96, "Cleaning up temporary files...")
 
     # Cleanup: delete temporary VTT files from GCS
     _delete_gcs_prefix(output_bucket, output_prefix)

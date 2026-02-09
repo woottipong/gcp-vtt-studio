@@ -185,15 +185,19 @@ async def process_youtube_url(task_id: str, url: str, language_code: str) -> Non
         update_task(
             task_id,
             TaskStatus.TRANSCRIBING,
-            "Transcribing audio (this may take a while)...",
+            "Queued for transcription...",
             progress=60
         )
+        
+        def on_progress(pct: int, msg: str):
+            update_task(task_id, TaskStatus.TRANSCRIBING, msg, progress=pct)
         
         vtt_content = await asyncio.to_thread(
             transcribe_audio, 
             gcs_uri, 
             task_id,
-            language_code
+            language_code,
+            on_progress
         )
         
         # Save VTT locally
@@ -293,15 +297,19 @@ async def process_uploaded_file(
         update_task(
             task_id,
             TaskStatus.TRANSCRIBING,
-            "Transcribing audio (this may take a while)...",
-            progress=70
+            "Queued for transcription...",
+            progress=60
         )
+        
+        def on_progress(pct: int, msg: str):
+            update_task(task_id, TaskStatus.TRANSCRIBING, msg, progress=pct)
         
         vtt_content = await asyncio.to_thread(
             transcribe_audio,
             gcs_uri,
             task_id,
-            language_code
+            language_code,
+            on_progress
         )
         
         # Save VTT locally
