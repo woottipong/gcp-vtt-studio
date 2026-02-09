@@ -119,20 +119,25 @@ def transcribe_audio(
     recognizer_path = f"{parent}/recognizers/{settings.stt_recognizer}"
 
     # Configure recognition settings (following Chirp 2 best practices)
-    config = cloud_speech.RecognitionConfig(
-        auto_decoding_config=cloud_speech.AutoDetectDecodingConfig(),
-        language_codes=[language_code],
-        model=settings.stt_model,
-        features=cloud_speech.RecognitionFeatures(
+    config_params = {
+        "auto_decoding_config": cloud_speech.AutoDetectDecodingConfig(),
+        "language_codes": [language_code],
+        "features": cloud_speech.RecognitionFeatures(
             enable_automatic_punctuation=True,
             enable_word_time_offsets=True,  # Required for VTT output format
         ),
         # Enable denoiser to reduce background music/noise (Chirp 2 feature)
-        denoiser_config=cloud_speech.DenoiserConfig(
+        "denoiser_config": cloud_speech.DenoiserConfig(
             denoise_audio=True,
             snr_threshold=20.0,  # Medium sensitivity (recommended for general use)
         ),
-    )
+    }
+    
+    # Only override model if explicitly set (otherwise use recognizer's default)
+    if settings.stt_model:
+        config_params["model"] = settings.stt_model
+    
+    config = cloud_speech.RecognitionConfig(**config_params)
 
     # Use GCS output with VTT format (Google handles segmentation)
     output_config = cloud_speech.RecognitionOutputConfig(

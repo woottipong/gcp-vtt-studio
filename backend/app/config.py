@@ -13,7 +13,7 @@ class Settings(BaseSettings):
     # Speech-to-Text V2 Settings
     stt_recognizer: str = "_"  # Use "_" for default recognizer
     stt_language_code: str = "th-TH"
-    stt_model: str = "long"
+    stt_model: Optional[str] = None  # If None, use recognizer's default model
     
     # File Processing Settings
     temp_dir: str = "/tmp/auto_vtt_studio"
