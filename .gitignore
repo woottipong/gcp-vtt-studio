@@ -1,0 +1,46 @@
+# Dependencies
+node_modules/
+venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Environment files
+.env
+*.env.local
+
+# Build outputs
+dist/
+build/
+*.egg-info/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Google Cloud credentials (NEVER commit these!)
+*.json
+!package.json
+!tsconfig.json
+!tsconfig.node.json
+!tailwind.config.js
+!postcss.config.js
+
+# Temporary files
+/tmp/
+*.tmp
+*.log
+logs/
+
+# Process IDs
+.backend.pid
+.frontend.pid
+
+# VTT output files
+vtt_output/
+
+# OS files
+.DS_Store
+Thumbs.db

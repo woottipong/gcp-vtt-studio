@@ -1,0 +1,136 @@
+import os
+import subprocess
+import uuid
+import shutil
+import signal
+from pathlib import Path
+from typing import Any
+import yt_dlp  # type: ignore
+from app.config import get_settings
+
+settings = get_settings()
+
+
+class TimeoutException(Exception):
+    """Raised when an operation times out."""
+    pass
+
+
+def timeout_handler(signum, frame):
+    """Signal handler for timeout."""
+    raise TimeoutException("Operation timed out")
+
+
+def ensure_temp_dir() -> Path:
+    """Ensure the temporary directory exists."""
+    temp_path = Path(settings.temp_dir)
+    temp_path.mkdir(parents=True, exist_ok=True)
+    return temp_path
+
+
+def download_youtube_audio(url: str, task_id: str) -> str:
+    """
+    Download audio from YouTube URL using yt-dlp.
+    Returns the path to the downloaded audio file.
+    Raises TimeoutException if download takes too long.
+    """
+    temp_dir = ensure_temp_dir()
+    output_path = temp_dir / task_id
+    output_path.mkdir(parents=True, exist_ok=True)
+    
+    output_template = str(output_path / "audio.%(ext)s")
+    
+    ydl_opts: Any = {
+        'format': 'bestaudio/best',
+        'outtmpl': output_template,
+        'quiet': True,
+        'no_warnings': True,
+        'extract_audio': True,
+        'js_runtimes': {'node': {}},
+        'remote_components': ['ejs:github'],
+        'socket_timeout': settings.youtube_download_timeout,
+        'postprocessors': [{
+            'key': 'FFmpegExtractAudio',
+            'preferredcodec': 'wav',
+        }],
+    }
+    
+    try:
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            ydl.download([url])
+    except Exception as e:
+        raise RuntimeError(f"Failed to download YouTube audio: {str(e)}")
+    
+    # Find the downloaded WAV file
+    wav_files = list(output_path.glob("*.wav"))
+    if not wav_files:
+        raise FileNotFoundError("Failed to download audio from YouTube")
+    
+    return str(wav_files[0])
+
+
+def convert_to_mono_16khz(input_path: str, task_id: str) -> str:
+    """
+    Convert audio file to mono 16kHz WAV using FFmpeg.
+    Returns the path to the converted file.
+    """
+    temp_dir = ensure_temp_dir()
+    output_dir = temp_dir / task_id
+    output_dir.mkdir(parents=True, exist_ok=True)
+    
+    output_path = output_dir / "audio_mono_16khz.wav"
+    
+    cmd = [
+        'ffmpeg',
+        '-i', input_path,
+        '-acodec', 'pcm_s16le',
+        '-ac', '1',  # Mono
+        '-ar', '16000',  # 16kHz
+        # Removed audio filter - let Chirp 3 denoiser handle noise reduction
+        '-y',  # Overwrite output
+        str(output_path)
+    ]
+    
+    result = subprocess.run(
+        cmd,
+        capture_output=True,
+        text=True
+    )
+    
+    if result.returncode != 0:
+        raise RuntimeError(f"FFmpeg conversion failed: {result.stderr}")
+    
+    return str(output_path)
+
+
+def save_uploaded_file(file_content: bytes, filename: str, task_id: str) -> str:
+    """
+    Save an uploaded audio file to the temp directory.
+    Returns the path to the saved file.
+    """
+    temp_dir = ensure_temp_dir()
+    output_dir = temp_dir / task_id
+    output_dir.mkdir(parents=True, exist_ok=True)
+    
+    # Sanitize filename
+    safe_filename = "".join(c for c in filename if c.isalnum() or c in ".-_")
+    output_path = output_dir / safe_filename
+    
+    with open(output_path, 'wb') as f:
+        f.write(file_content)
+    
+    return str(output_path)
+
+
+def cleanup_task_files(task_id: str) -> None:
+    """Clean up temporary files for a task."""
+    temp_dir = ensure_temp_dir()
+    task_dir = temp_dir / task_id
+    
+    if task_dir.exists():
+        shutil.rmtree(task_dir)
+
+
+def generate_task_id() -> str:
+    """Generate a unique task ID."""
+    return str(uuid.uuid4())
