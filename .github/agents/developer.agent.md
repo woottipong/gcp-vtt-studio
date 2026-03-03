@@ -447,8 +447,8 @@ curl -H "Authorization: Bearer $(gcloud auth print-access-token)" \
 ```bash
 cd frontend
 rm -rf node_modules package-lock.json
-npm install
-npm run build
+pnpm install
+pnpm build
 ```
 
 ---

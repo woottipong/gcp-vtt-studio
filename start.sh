@@ -72,7 +72,12 @@ fi
 if [ ! -d "frontend/node_modules" ]; then
     echo -e "${YELLOW}Frontend dependencies not found. Installing...${NC}"
     cd frontend
-    npm install
+    # Check if pnpm is available, otherwise use npm
+    if command -v pnpm &> /dev/null; then
+        pnpm install
+    else
+        npm install
+    fi
     cd ..
     echo -e "${GREEN}✓ Frontend dependencies installed${NC}"
     echo ""
@@ -114,7 +119,12 @@ sleep 2
 # Start Frontend
 echo -e "${BLUE}Starting Frontend (Vite)...${NC}"
 cd frontend
-nohup npm run dev > ../logs/frontend.log 2>&1 &
+# Check if pnpm is available, otherwise use npm
+if command -v pnpm &> /dev/null; then
+    nohup pnpm dev > ../logs/frontend.log 2>&1 &
+else
+    nohup npm run dev > ../logs/frontend.log 2>&1 &
+fi
 FRONTEND_PID=$!
 cd ..
 echo -e "${GREEN}✓ Frontend started on http://localhost:5173 (PID: $FRONTEND_PID)${NC}"

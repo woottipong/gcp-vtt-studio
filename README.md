@@ -198,7 +198,10 @@ sudo apt update && sudo apt install ffmpeg
 ```bash
 cd frontend
 
-# Install dependencies
+# Install dependencies (using pnpm - recommended for better space efficiency)
+pnpm install
+
+# Alternative: npm install
 npm install
 ```
 
@@ -214,6 +217,9 @@ uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 
 ```bash
 cd frontend
+pnpm dev
+
+# Alternative: npm run dev
 npm run dev
 ```
 
@@ -275,6 +281,9 @@ curl -X POST http://localhost:8000/api/transcribe/upload \
 
 ```bash
 cd frontend
+pnpm build
+
+# Alternative: npm run build
 npm run build
 ```
 
@@ -348,6 +357,7 @@ auto_vtt_studio/
 │   │   ├── components/          # React components
 │   │   └── hooks/               # Custom hooks
 │   ├── package.json
+│   ├── pnpm-lock.yaml           # pnpm lock file (recommended)
 │   └── node_modules/
 ├── credential/
 │   └── stt-google.json          # Service account key
@@ -412,6 +422,9 @@ auto_vtt_studio/
    
    # Reinstall frontend dependencies
    cd frontend
+   pnpm install
+   
+   # Alternative: npm install
    npm install
    ```
 
